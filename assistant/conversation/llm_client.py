@@ -1,25 +1,28 @@
-"""Thin wrapper around the Google Gemini (google-generativeai) SDK.
+"""LLM wrapper using google-genai's Client.models.list() to select a model
+and then client.chats.create() + chat.send_message() to get a reply.
 
-Reads GEMINI_API_KEY from environment (use python-dotenv in development).
-Provides a single helper `generate_response(messages)` where `messages` is
-a list of dicts: [{'role': 'user'|'assistant'|'system', 'content': '...'}, ...]
+Behavior:
+- If GEMINI_MODEL env var is set, use that model string directly.
+- Otherwise, call client.models.list(), filter for models with 'gemini' and
+  'flash' in their name (case-insensitive), and use the first match.
+- If none matches, fall back to the first model containing 'gemini'.
+- Print (and log) the selected model so the user can confirm.
 
-If the google.generativeai SDK is not installed or the API call fails, the
-wrapper falls back to a safe echo response so the app remains runnable.
+The chat uses history by concatenating prior turns into a single prompt
+that is sent as one message to chat.send_message().
 """
 from typing import List, Dict, Optional
 import os
 import logging
 
 try:
-    # Optional: SDK may be installed as `google.generativeai`
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
     _HAS_GENAI = True
 except Exception:
     genai = None  # type: ignore
     _HAS_GENAI = False
 
-# Load .env if present (no hard dependency on python-dotenv at import time)
+# Load .env if present
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -27,79 +30,111 @@ except Exception:
     pass
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-
+GEMINI_MODEL_OVERRIDE = os.environ.get('GEMINI_MODEL')
+DEFAULT_MODEL = 'gemini-flash-latest'
 logger = logging.getLogger(__name__)
 
 
-def generate_response(messages: List[Dict[str, str]], model: str = "gemini-1.0") -> str:
-    """Generate an assistant response for the provided messages.
+def _build_prompt_from_messages(messages: List[Dict[str, str]]) -> str:
+    parts = []
+    for m in messages:
+        role = m.get('role')
+        content = m.get('content', '')
+        if role == 'system':
+            parts.append(f"[System]\n{content}\n")
+    parts.append('[Conversation history]')
+    for m in messages:
+        role = m.get('role')
+        content = m.get('content', '')
+        if role == 'user':
+            parts.append(f"User: {content}")
+        elif role == 'assistant':
+            parts.append(f"Assistant: {content}")
+    parts.append('\nAssistant, please reply concisely to the latest user message above.')
+    return '\n'.join(parts)
 
-    messages: list of {'role': 'user'|'assistant'|'system', 'content': str}
-    Returns assistant text.
-    """
-    # Simple safety: find the last user message for echo fallback
+
+def _select_model(client, prefer_flash=True) -> Optional[str]:
+    # If override provided, use it
+    if GEMINI_MODEL_OVERRIDE:
+        logger.info('Using GEMINI_MODEL override: %s', GEMINI_MODEL_OVERRIDE)
+        print(f"Selected model (override): {GEMINI_MODEL_OVERRIDE}")
+        return GEMINI_MODEL_OVERRIDE
+
+    try:
+        models = client.models.list()
+    except Exception as e:
+        logger.exception('Failed to list models: %s', e)
+        return None
+
+    candidate = None
+    gemini_candidates = []
+    # Iterate through models and find matching names
+    for m in models:
+        # model objects may be dict-like or have 'name' attribute
+        name = None
+        if isinstance(m, dict):
+            name = m.get('name') or m.get('id')
+        else:
+            name = getattr(m, 'name', None) or getattr(m, 'id', None)
+        if not name:
+            # fallback to string representation
+            try:
+                name = str(m)
+            except Exception:
+                continue
+        lname = name.lower()
+        if 'gemini' in lname:
+            gemini_candidates.append(name)
+
+    # Prefer flash-tier
+    for g in gemini_candidates:
+        if 'flash' in g.lower():
+            candidate = g
+            break
+    if not candidate and gemini_candidates:
+        candidate = gemini_candidates[0]
+
+    if candidate:
+        logger.info('Selected model: %s', candidate)
+        print(f"Selected model: {candidate}")
+    else:
+        logger.warning('No Gemini model found from list() — using provided model string fallback')
+    return candidate
+
+
+def generate_response(messages: List[Dict[str, str]]) -> str:
     last_user = None
     for m in reversed(messages):
         if m.get('role') == 'user':
             last_user = m.get('content')
             break
 
-    # If the SDK is available and an API key exists, try to call Gemini.
     if _HAS_GENAI and GEMINI_API_KEY:
         try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            # Normalize messages for the SDK: author / content list of text blocks
-            sdk_messages = []
-            for m in messages:
-                sdk_messages.append({
-                    'author': m.get('role', 'user'),
-                    'content': [{'type': 'text', 'text': m.get('content', '')}]
-                })
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            selected = _select_model(client)
+            model_to_use_raw = selected or GEMINI_MODEL_OVERRIDE or DEFAULT_MODEL
+            # Strip redundant 'models/' prefix if present
+            model_to_use = model_to_use_raw.split('/')[-1]
+            logger.info("Using model (raw=%s, cleaned=%s)", model_to_use_raw, model_to_use)
+            print(f"Model being passed to client.chats.create(): '{model_to_use}' (raw: '{model_to_use_raw}')")
 
-            # This call may vary across SDK versions; wrap in try/except and
-            # fall back to a safe echo if anything unexpected happens.
-            resp = genai.chat.create(model=model, messages=sdk_messages)
+            # Create chat with chosen model
+            chat = client.chats.create(model=model_to_use)
 
-            # Attempt to extract text from known response shapes.
-            # Newer SDKs expose candidates; older ones may expose 'last'.
-            text = None
-            # Try common paths (guarded)
-            if hasattr(resp, 'candidates') and resp.candidates:
-                c = resp.candidates[0]
-                # candidate may have content with text blocks
-                if isinstance(c, dict):
-                    # dict-based response
-                    cont = c.get('content') or []
-                    if cont and isinstance(cont, list) and isinstance(cont[0], dict):
-                        text = ''.join(part.get('text', '') for part in cont if isinstance(part, dict))
-                else:
-                    # object-based candidate
-                    try:
-                        parts = getattr(c, 'content', None)
-                        if parts:
-                            text = ''.join(getattr(p, 'text', '') for p in parts)
-                    except Exception:
-                        text = None
+            prompt = _build_prompt_from_messages(messages)
+            resp = chat.send_message(prompt)
 
-            if not text and hasattr(resp, 'last'):
-                try:
-                    last = resp.last
-                    # last may have 'content' list of dicts
-                    content = getattr(last, 'content', None)
-                    if content:
-                        text = ''.join(getattr(p, 'text', '') for p in content)
-                except Exception:
-                    text = None
-
-            if text:
-                return text.strip()
-            else:
-                logger.warning('Unexpected response shape from google.generativeai; falling back to echo')
+            # Expect .text per provided pattern
+            if hasattr(resp, 'text') and isinstance(getattr(resp, 'text'), str):
+                return getattr(resp, 'text').strip()
+            if isinstance(resp, dict) and 'text' in resp:
+                return resp['text'].strip()
+            return str(resp).strip()
         except Exception as e:
-            logger.exception('Gemini SDK call failed — falling back to echo: %s', e)
+            logger.exception('GenAI live call failed: %s', e)
 
-    # Fallback behavior (safe, deterministic): echo the user's last message with a prefix.
     if last_user:
         return f"(local-echo) I received: {last_user}"
-
     return "(local-echo) Hello — no user message provided."
