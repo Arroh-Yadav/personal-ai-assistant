@@ -31,8 +31,17 @@ except Exception:
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 GEMINI_MODEL_OVERRIDE = os.environ.get('GEMINI_MODEL')
-DEFAULT_MODEL = 'gemini-flash-latest'
+DEFAULT_MODEL = 'gemini-3.1-flash-lite'
 logger = logging.getLogger(__name__)
+
+# Warn loudly if GEMINI_MODEL isn't set so it's not a silent fallback
+if not GEMINI_MODEL_OVERRIDE:
+    logger.warning('GEMINI_MODEL not set; falling back to DEFAULT_MODEL=%s. Set GEMINI_MODEL in .env to avoid silent fallback.', DEFAULT_MODEL)
+    try:
+        # also print to console for immediate visibility
+        print(f"WARNING: GEMINI_MODEL not set; falling back to default model {DEFAULT_MODEL}")
+    except Exception:
+        pass
 
 
 def _build_prompt_from_messages(messages: List[Dict[str, str]]) -> str:
