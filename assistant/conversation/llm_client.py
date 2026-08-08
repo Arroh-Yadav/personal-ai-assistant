@@ -132,55 +132,199 @@ def generate_response(messages: List[Dict[str, str]], tools: Optional[List[Dict]
         logger.info("Using model (raw=%s, cleaned=%s)", model_to_use_raw, model_to_use)
         print(f"Model being passed to client.chats.create(): '{model_to_use}' (raw: '{model_to_use_raw}')")
 
-        # Debug: print the tools object passed in
-        print('tools parameter passed to generate_response is', type(tools), 'value:', (tools if isinstance(tools, list) else str(tools)))
-        if isinstance(tools, list):
+        import json as _json
+        # Normalize tools into the exact payload the SDK expects. Prefer the
+        # simpler parametersJsonSchema path: pass registry JSON Schema dicts
+        # directly via FunctionDeclaration.parametersJsonSchema, then wrap each
+        # declaration into a genai.types.Tool(functionDeclarations=[...]).
+        tools_payload = None
+        if tools:
             try:
-                print('Passing tool schemas to SDK:', [t.get('name') for t in tools])
+                normalized = []
+                for t in tools:
+                    normalized.append({
+                        'name': t.get('name'),
+                        'description': t.get('description'),
+                        'parameters': t.get('parameters')
+                    })
+
+                log_payload = normalized
+
+                if hasattr(genai, 'types') and hasattr(genai.types, 'FunctionDeclaration') and hasattr(genai.types, 'Tool') and hasattr(genai.types, 'Schema'):
+                    FD = genai.types.FunctionDeclaration
+                    ToolType = genai.types.Tool
+                    SchemaType = genai.types.Schema
+
+                    def _build_schema(jschema):
+                        # recursively convert a JSON Schema dict into genai.types.Schema
+                        if jschema is None:
+                            return None
+                        if isinstance(jschema, genai.types.Schema):
+                            return jschema
+                        if not isinstance(jschema, dict):
+                            return jschema
+                        kw = {}
+                        # copy simple fields
+                        for f in ('title','description','default','required','type','format','enum','minItems','maxItems','minLength','maxLength','minimum','maximum'):
+                            if f in jschema:
+                                kw[f] = jschema[f]
+                        # properties
+                        if 'properties' in jschema and isinstance(jschema['properties'], dict):
+                            props = {}
+                            for k,v in jschema['properties'].items():
+                                props[k] = _build_schema(v)
+                            kw['properties'] = props
+                        # items
+                        if 'items' in jschema:
+                            kw['items'] = _build_schema(jschema['items'])
+                        try:
+                            return SchemaType(**kw)
+                        except Exception:
+                            # fallback: return original dict
+                            return jschema
+
+                    built = []
+                    for n in normalized:
+                        try:
+                            params = n.get('parameters')
+                            schema_obj = _build_schema(params)
+                            fd_inst = FD(name=n.get('name'), description=n.get('description'), parameters=schema_obj)
+                            # Some SDK variants use function_declarations vs functionDeclarations attr
+                            try:
+                                tool_inst = ToolType(functionDeclarations=[fd_inst])
+                            except TypeError:
+                                tool_inst = ToolType(function_declarations=[fd_inst])
+                            built.append(tool_inst)
+                        except Exception:
+                            # fallback to dict if construction fails for a particular tool
+                            built.append({'name': n.get('name'), 'description': n.get('description'), 'parameters': n.get('parameters')})
+                    tools_payload = built
+                else:
+                    # SDK types not available; pass plain dicts
+                    tools_payload = normalized
+            except Exception as e:
+                logger.exception('Failed to build tools payload: %s', e)
+                tools_payload = tools
+                log_payload = tools
+        else:
+            tools_payload = []
+            log_payload = []
+
+        # Log the tools payload JSON before calling the API for easy debugging
+        try:
+            import json as _json
+            # Build a debug-friendly view of the actual SDK objects we'll send
+            debug_payload = []
+            try:
+                for t in (tools_payload or []):
+                    if hasattr(t, 'functionDeclarations'):
+                        fds = []
+                        for fd in getattr(t, 'functionDeclarations') or []:
+                            fd_repr = {
+                                'name': getattr(fd, 'name', None),
+                                'description': getattr(fd, 'description', None),
+                                'parametersJsonSchema': getattr(fd, 'parametersJsonSchema', None) or getattr(fd, 'parameters', None)
+                            }
+                            fds.append(fd_repr)
+                        debug_payload.append({'type': 'Tool', 'functionDeclarations': fds})
+                    else:
+                        debug_payload.append(t)
             except Exception:
-                pass
+                debug_payload = log_payload
 
-        # Try to create chat with tools attached (preferred). SDKs differ on kw name.
-        chat = None
-        try:
-            if tools:
-                # try common kw names on create()
+            print('Final tools payload (JSON):')
+            print(_json.dumps(debug_payload, default=str, indent=2))
+        except Exception:
+            print('Final tools payload (non-serializable) ->', str(log_payload))
+
+        # If tools are provided, prefer the lower-level generate_content path
+        # which accepts tools/config directly and is stateless. Build the full
+        # conversation history into the 'contents' parameter each call.
+        raw = None
+        if tools_payload:
+            try:
+                # Build contents list from messages so the model sees full history
+                contents = []
+                for m in messages:
+                    role = m.get('role')
+                    content = m.get('content', '')
+                    if role == 'system':
+                        # as a standalone system instruction
+                        contents.append(content)
+                    elif role == 'user':
+                        contents.append(f"User: {content}")
+                    elif role == 'assistant':
+                        contents.append(f"Assistant: {content}")
+
+                # Also include a final assistant instruction to answer concisely
+                contents.append('\nAssistant, please reply concisely to the latest user message above.')
+
+                # Build GenerateContentConfig with tools and automatic function calling
                 try:
-                    chat = client.chats.create(model=model_to_use, tools=tools)
-                except TypeError:
-                    chat = client.chats.create(model=model_to_use, tool_definitions=tools)
-            else:
+                    cfg = genai.types.GenerateContentConfig(tools=tools_payload, automaticFunctionCalling=genai.types.AutomaticFunctionCallingConfig())
+                except Exception:
+                    # fallback: try without explicit AutomaticFunctionCalling
+                    try:
+                        cfg = genai.types.GenerateContentConfig(tools=tools_payload)
+                    except Exception:
+                        cfg = None
+
+                # Call generate_content directly
+                if cfg is not None:
+                    resp = client.models.generate_content(model=model_to_use, contents=contents, config=cfg)
+                else:
+                    resp = client.models.generate_content(model=model_to_use, contents=contents)
+
+                raw = resp
+
+                # Inspect candidates content parts for a FunctionCall
+                try:
+                    cands = getattr(resp, 'candidates', None)
+                    if cands:
+                        first = cands[0]
+                        content = getattr(first, 'content', None)
+                        if content and isinstance(content, list):
+                            for part in content:
+                                fc = getattr(part, 'function_call', None) or (part.get('function_call') if isinstance(part, dict) else None)
+                                if fc:
+                                    # fc may be a genai.types.FunctionCall or dict
+                                    name = getattr(fc, 'name', None) or (fc.get('name') if isinstance(fc, dict) else None)
+                                    args = getattr(fc, 'args', None) or (fc.get('args') if isinstance(fc, dict) else None) or getattr(fc, 'arguments', None) or (fc.get('arguments') if isinstance(fc, dict) else None)
+                                    # args may be a dict already
+                                    return {"type": "tool_call", "tool_name": name, "arguments": args, "raw": raw}
+                except Exception:
+                    pass
+
+            except Exception as e:
+                logger.exception('GenAI generate_content call failed: %s', e)
+                # Fall through to text fallback below
+        else:
+            # No tools: try chat session approach as before
+            try:
                 chat = client.chats.create(model=model_to_use)
-        except TypeError:
-            # fallback: create without tools
-            chat = client.chats.create(model=model_to_use)
-
-        prompt = _build_prompt_from_messages(messages)
-
-        # Now send the message; some SDKs accept tools at send_message time
-        try:
-            if tools:
-                try:
-                    resp = chat.send_message(prompt, tools=tools)
-                except TypeError:
-                    resp = chat.send_message(prompt, tool_definitions=tools)
-            else:
+                prompt = _build_prompt_from_messages(messages)
                 resp = chat.send_message(prompt)
-        except TypeError:
-            # last resort: send without tools
-            resp = chat.send_message(prompt)
+                raw = resp
+            except Exception as e:
+                logger.exception('Chat-based call failed: %s', e)
+                # Fall through to fallback
 
-        # Attach raw for debugging
-        raw = resp
+        # Attach raw for debugging if not already set
+        if raw is None:
+            raw = None
 
         # Check for structured automatic function/tool calling history
         try:
-            afc = getattr(resp, 'automatic_function_calling_history', None)
+            afc = getattr(raw, 'automatic_function_calling_history', None)
             if afc:
-                # Inspect last entry for tool name/args
                 last = afc[-1]
                 name = getattr(last, 'tool_name', None) or (last.get('tool_name') if isinstance(last, dict) else None)
                 args = getattr(last, 'arguments', None) or (last.get('arguments') if isinstance(last, dict) else None)
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except Exception:
+                        pass
                 if name:
                     return {"type": "tool_call", "tool_name": name, "arguments": args, "raw": raw}
         except Exception:

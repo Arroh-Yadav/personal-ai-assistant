@@ -1,0 +1,75 @@
+[
+  {
+    "type": "Tool",
+    "function_declarations": [
+      {
+        "name": "create_file",
+        "description": "Create a new text file at the given path with the given content.",
+        "parametersJsonSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path to create"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text content to write"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "type": "Tool",
+    "function_declarations": [
+      {
+        "name": "read_file",
+        "description": "Read a text file and return its contents.",
+        "parametersJsonSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path to read"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "type": "Tool",
+    "function_declarations": [
+      {
+        "name": "write_file",
+        "description": "Alias for create_file - write content to a file.",
+        "parametersJsonSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "File path to create"
+            },
+            "content": {
+              "type": "string",
+              "description": "Text content to write"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        }
+      }
+    ]
+  }
+]
