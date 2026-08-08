@@ -2,3 +2,10 @@ google-genai
 python-dotenv
 pytest
 
+# Phase 3 (voice) dependencies
+numpy
+sounddevice
+keyboard
+faster-whisper
+edge-tts
+playsound==1.2.2
