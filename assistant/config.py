@@ -14,3 +14,7 @@ PUSH_TO_TALK_KEY = os.getenv("PUSH_TO_TALK_KEY", "right ctrl")
 # STT model size for faster-whisper. Smaller models are faster but less accurate.
 # Options: tiny, base, small, medium, large. Override via STT_MODEL_SIZE env var.
 STT_MODEL_SIZE = os.getenv("STT_MODEL_SIZE", "small")
+
+# TTS voice for edge-tts (Microsoft TTS). Common options: en-US-AriaNeural,
+# en-US-GuyNeural, en-GB-SoniaNeural, etc. Override via TTS_VOICE env var.
+TTS_VOICE = os.getenv("TTS_VOICE", "en-US-AriaNeural")
