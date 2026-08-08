@@ -59,6 +59,8 @@ def _build_prompt_from_messages(messages: List[Dict[str, str]]) -> str:
             parts.append(f"User: {content}")
         elif role == 'assistant':
             parts.append(f"Assistant: {content}")
+        elif role == 'tool':
+            parts.append(f"Tool result: {content}")
     parts.append('\nAssistant, please reply concisely to the latest user message above.')
     return '\n'.join(parts)
 
@@ -264,6 +266,8 @@ def generate_response(messages: List[Dict[str, str]], tools: Optional[List[Dict]
                         contents.append(f"User: {content}")
                     elif role == 'assistant':
                         contents.append(f"Assistant: {content}")
+                    elif role == 'tool':
+                        contents.append(f"Tool result: {content}")
 
                 # Also include a final assistant instruction to answer concisely
                 contents.append('\nAssistant, please reply concisely to the latest user message above.')
@@ -292,8 +296,9 @@ def generate_response(messages: List[Dict[str, str]], tools: Optional[List[Dict]
                     if cands:
                         first = cands[0]
                         content = getattr(first, 'content', None)
-                        if content and isinstance(content, list):
-                            for part in content:
+                        parts = getattr(content, 'parts', None) if content else None
+                        if parts:
+                            for part in parts:
                                 fc = getattr(part, 'function_call', None) or (part.get('function_call') if isinstance(part, dict) else None)
                                 if fc:
                                     # fc may be a genai.types.FunctionCall or dict
@@ -351,14 +356,15 @@ def generate_response(messages: List[Dict[str, str]], tools: Optional[List[Dict]
                     first = cands[0]
                     # candidate may have content attribute with parts
                     content = getattr(first, 'content', None)
-                    if content and isinstance(content, list):
-                        parts = []
-                        for p in content:
+                    parts = getattr(content, 'parts', None) if content else None
+                    if parts:
+                        text_parts = []
+                        for p in parts:
                             t = getattr(p, 'text', None) or (p.get('text') if isinstance(p, dict) else None)
                             if t:
-                                parts.append(t)
-                        if parts:
-                            text = ''.join(parts)
+                                text_parts.append(t)
+                        if text_parts:
+                            text = ''.join(text_parts)
             except Exception:
                 text = None
 
